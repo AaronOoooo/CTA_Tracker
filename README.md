@@ -61,7 +61,15 @@ Notes
 
 CTA data comes from the official CTA Bus Tracker API. Predictions depend on service availability and may be empty at certain times.
 
-Version
+## Version History
+
+v0.0.2
+- Added on-screen refresh countdown and spinner
+- Added last refresh timestamp (12-hour format)
+- Added route direction (NB/SB)
+- Improved Wi-Fi recovery and stability
+- Added Serial logging for debugging
+- Added HTTP-based time sync with DST support
 
 v0.0.1 — initial working version (PyPortal display + Serial logging + auto-reconnect)
 
