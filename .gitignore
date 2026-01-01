@@ -1,0 +1,10 @@
+# CircuitPython secrets
+secrets.py
+
+# CircuitPython system files
+*.mpy
+boot_out.txt
+
+# macOS / Windows noise
+.DS_Store
+Thumbs.db
