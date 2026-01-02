@@ -10,6 +10,8 @@ import rtc
 import adafruit_connection_manager
 import adafruit_requests
 import adafruit_esp32spi.adafruit_esp32spi as esp32
+from adafruit_requests import OutOfRetries
+
 
 from secrets import secrets
 
@@ -78,6 +80,29 @@ pool = adafruit_connection_manager.get_radio_socketpool(esp)
 ssl_context = adafruit_connection_manager.get_radio_ssl_context(esp)
 requests = adafruit_requests.Session(pool, ssl_context)
 
+def rebuild_network():
+    global esp, pool, ssl_context, requests
+
+    print("Rebuilding network stack...")
+
+    try:
+        esp.reset()
+        time.sleep(1)
+    except Exception as e:
+        print("ESP reset error:", repr(e))
+
+    # Recreate ESP object (fresh SPI state)
+    esp = esp32.ESP_SPIcontrol(spi, esp32_cs, esp32_ready, esp32_reset)
+
+    # Reconnect WiFi
+    connect_wifi()
+
+    # Recreate socket pool + requests session
+    pool = adafruit_connection_manager.get_radio_socketpool(esp)
+    ssl_context = adafruit_connection_manager.get_radio_ssl_context(esp)
+    requests = adafruit_requests.Session(pool, ssl_context)
+
+    print("Network rebuild complete.")
 
 # =========================
 # TIME HELPERS
@@ -198,17 +223,27 @@ def fetch_predictions():
     url = build_url()
     print("GET CTA predictions (url hidden)")
 
-    with requests.get(url) as r:
-        data = r.json()
+    for attempt in range(2):  # try once, then rebuild + retry once
+        try:
+            with requests.get(url) as r:
+                data = r.json()
 
-    res = data.get("bustime-response", {})
-    preds = res.get("prd", [])
-    if isinstance(preds, dict):
-        preds = [preds]
-    if not isinstance(preds, list):
-        preds = []
+            res = data.get("bustime-response", {})
+            preds = res.get("prd", [])
+            if isinstance(preds, dict):
+                preds = [preds]
+            if not isinstance(preds, list):
+                preds = []
 
-    return preds
+            return preds
+
+        except (OutOfRetries, OSError, TimeoutError, RuntimeError, ValueError) as e:
+            print("Fetch error:", repr(e))
+            if attempt == 0:
+                set_rows(["Network hiccup...", "Rebuilding..."])
+                rebuild_network()
+                continue
+            raise
 
 def direction_abbrev(preds):
     # Pull NB/SB from first prediction's rtdir if present
@@ -375,9 +410,9 @@ while True:
 
         time.sleep(UI_TICK_SECONDS)
 
-    except (TimeoutError, RuntimeError, OSError) as e:
-        # ESP32SPI hiccup recovery: reset WiFi and continue
-        print("Hardware/network error:", repr(e))
-        set_rows(["Reconnecting WiFi..."])
-        connect_wifi()
-        # keep ticking UI; next fetch will happen when countdown reaches 0
+    except (TimeoutError, RuntimeError, OSError, OutOfRetries, ValueError) as e:
+        print("Network error:", repr(e))
+        set_rows(["Network issue...", "Reconnecting..."])
+        rebuild_network()
+        # Optionally force immediate refresh after recovery:
+        seconds_to_refresh = 1
