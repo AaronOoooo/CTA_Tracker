@@ -26,7 +26,7 @@ REFRESH_SECONDS = 30          # API refresh interval
 UI_TICK_SECONDS = 1           # countdown/spinner tick
 HOST = "www.ctabustracker.com"
 
-DEST_WIDTH = 18               # width for destination column
+DEST_WIDTH = 16             # width for destination column
 
 SPINNER_FRAMES = ["|", "/", "-", "\\"]  # safe in terminal font
 
@@ -291,9 +291,9 @@ def pad_right(s, width):
 def format_arrival_line(p):
     rt = str(p.get("rt", "??"))
     des = str(p.get("des", ""))
-    cdn = str(p.get("prdctdn", ""))
+    cdn = str(p.get("prdctdn", "")).strip()
 
-    # Route padded to 3 chars
+    # Route padded to 3 chars (no rjust/ljust)
     if len(rt) == 1:
         rt = rt + "  "
     elif len(rt) == 2:
@@ -301,14 +301,17 @@ def format_arrival_line(p):
     else:
         rt = rt[:3]
 
+    # Destination padded
     des = pad_right(des, DEST_WIDTH)
 
     # Keep DUE as DUE
     if cdn.upper() == "DUE":
         cdn = "DUE"
 
-    return rt + " " + des + " " + cdn
+    # New: add clock time
+    clk = arrival_clock_text(p)
 
+    return rt + " " + des + " " + cdn + "  " + clk
 
 # =========================
 # UI STATE
@@ -357,6 +360,44 @@ def mark_updated_now():
     else:
         last_updated_text = "--:--"
 
+def format_clock_12h_lower(hour24, minute):
+    ampm = "am"
+    if hour24 >= 12:
+        ampm = "pm"
+    hour12 = hour24 % 12
+    if hour12 == 0:
+        hour12 = 12
+    return "{}:{:02d}{}".format(hour12, minute, ampm)
+
+
+def arrival_clock_text(p):
+    """
+    Returns 'h:mmam/pm' for the bus arrival time.
+    Uses CTA 'prdtm' first; falls back to now + minutes when possible.
+    """
+    # 1) Use CTA provided prediction timestamp
+    prdtm = p.get("prdtm", "")
+    if prdtm and isinstance(prdtm, str) and len(prdtm) >= 14:
+        # CTA format: "YYYYMMDD HH:MM"
+        try:
+            hour24 = int(prdtm[9:11])
+            minute = int(prdtm[12:14])
+            return format_clock_12h_lower(hour24, minute)
+        except Exception:
+            pass
+
+    # 2) Fallback: now + prdctdn minutes (only if we have real time)
+    cdn = str(p.get("prdctdn", "")).strip().upper()
+    if time_ready and cdn and cdn != "DUE":
+        try:
+            mins = int(cdn)
+            now = time.time()
+            t = time.localtime(now + (mins * 60))
+            return format_clock_12h_lower(t.tm_hour, t.tm_min)
+        except Exception:
+            pass
+
+    return "--:--"
 
 # =========================
 # MAIN
