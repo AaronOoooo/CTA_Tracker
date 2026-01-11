@@ -12,8 +12,10 @@ import adafruit_requests
 import adafruit_esp32spi.adafruit_esp32spi as esp32
 from adafruit_requests import OutOfRetries
 
-
 from secrets import secrets
+
+import gc
+import microcontroller
 
 # =========================
 # CONFIG
@@ -30,6 +32,12 @@ DEST_WIDTH = 16             # width for destination column
 
 SPINNER_FRAMES = ["|", "/", "-", "\\"]  # safe in terminal font
 
+DEBUG_SCREEN = False  # True only if you want to mirror the screen to Serial
+
+TIME_SYNC_RETRY_INTERVAL = 15 * 60  # retry every 15 minutes until it works
+_last_time_sync_attempt = 0
+
+DEBUG_ROWS = False  # True only if you want to print arrival rows to Serial
 
 # =========================
 # DISPLAY SETUP (Option A)
@@ -334,10 +342,10 @@ def update_header(stop_name, dir_abbrev, updated_text, seconds_left, spinner_cha
     line_status.text = "Updated {}  Next in {:>2d}s  {}".format(updated_text, seconds_left, spinner_char)
 
     # SERIAL MIRROR
-    print("[SCREEN] " + line_stop.text)
-    print("[SCREEN] " + line_status.text)
-
-
+    # SERIAL MIRROR (optional)
+    if DEBUG_SCREEN:
+        print("[SCREEN] " + line_stop.text)
+        print("[SCREEN] " + line_status.text)
 
 def tick_ui(stop_name, dir_abbrev):
     global spinner_i, seconds_to_refresh
@@ -352,9 +360,20 @@ def tick_ui(stop_name, dir_abbrev):
 
     update_header(stop_name, dir_abbrev, last_updated_text, seconds_to_refresh, spinner_char)
 
-
 def mark_updated_now():
-    global last_updated_text
+    global last_updated_text, time_ready, _last_time_sync_attempt
+
+    # If we don't have real time yet, retry periodically (non-spammy)
+    if not time_ready:
+        now = time.monotonic()
+        if (now - _last_time_sync_attempt) > TIME_SYNC_RETRY_INTERVAL:
+            _last_time_sync_attempt = now
+            try:
+                time_ready = try_set_time_via_http()
+            except Exception:
+                time_ready = False
+
+    # Now set the updated text
     if time_ready:
         last_updated_text = format_time_12h(time.localtime())
     else:
