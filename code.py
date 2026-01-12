@@ -39,6 +39,9 @@ _last_time_sync_attempt = 0
 
 DEBUG_ROWS = False  # True only if you want to print arrival rows to Serial
 
+MAX_REBUILDS_BEFORE_RESET = 3
+rebuild_count = 0
+
 # =========================
 # DISPLAY SETUP (Option A)
 # =========================
@@ -71,9 +74,13 @@ def set_rows(lines):
         rows[i].text = lines[i] if i < len(lines) else ""
 
     # SERIAL MIRROR
-    print("[SCREEN] Rows:")
-    for line in lines:
-        print("  " + line)
+    if DEBUG_ROWS:
+        print("[SCREEN] Rows:")
+        for line in lines:
+            print("  " + line)
+
+def gc_sweep(tag=""):
+    gc.collect()
 
 # =========================
 # ESP32 NETWORK SETUP
@@ -89,9 +96,17 @@ ssl_context = adafruit_connection_manager.get_radio_ssl_context(esp)
 requests = adafruit_requests.Session(pool, ssl_context)
 
 def rebuild_network():
-    global esp, pool, ssl_context, requests
+    global requests, pool, ssl_context, esp, time_ready, rebuild_count
 
     print("Rebuilding network stack...")
+
+    rebuild_count += 1
+    print(f"Rebuild count: {rebuild_count}/{MAX_REBUILDS_BEFORE_RESET}")
+
+    if rebuild_count >= MAX_REBUILDS_BEFORE_RESET:
+        print("Too many network rebuilds; forcing device reset.")
+        time.sleep(1)
+        microcontroller.reset()
 
     try:
         esp.reset()
@@ -228,6 +243,8 @@ def build_url():
     )
 
 def fetch_predictions():
+    global rebuild_count
+
     url = build_url()
     print("GET CTA predictions (url hidden)")
 
@@ -243,13 +260,28 @@ def fetch_predictions():
             if not isinstance(preds, list):
                 preds = []
 
+            try:
+                del data
+                del res
+            except Exception:
+                pass
+
+            gc_sweep("after fetch")
+            rebuild_count = 0
             return preds
+
+        except MemoryError as e:
+            print("MemoryError during fetch:", repr(e))
+            print("Forcing device reset to recover memory.")
+            time.sleep(1)
+            microcontroller.reset()
 
         except (OutOfRetries, OSError, TimeoutError, RuntimeError, ValueError) as e:
             print("Fetch error:", repr(e))
             if attempt == 0:
                 set_rows(["Network hiccup...", "Rebuilding..."])
                 rebuild_network()
+                time.sleep(2)
                 continue
             raise
 
