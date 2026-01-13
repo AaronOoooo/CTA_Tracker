@@ -104,7 +104,7 @@ def rebuild_network():
     print(f"Rebuild count: {rebuild_count}/{MAX_REBUILDS_BEFORE_RESET}")
 
     if rebuild_count >= MAX_REBUILDS_BEFORE_RESET:
-        print("Too many network rebuilds; forcing device reset.")
+        print("Too many rebuilds; forcing device reset.")
         time.sleep(1)
         microcontroller.reset()
 
@@ -114,12 +114,12 @@ def rebuild_network():
     except Exception as e:
         print("ESP reset error:", repr(e))
 
-    # Recreate ESP object (fresh SPI state)
-    esp = esp32.ESP_SPIcontrol(spi, esp32_cs, esp32_ready, esp32_reset)
-
     # Reconnect WiFi
     connect_wifi()
 
+    # Free old network objects to reduce heap fragmentation before rebuilding
+    drop_network_objects()
+    
     # Recreate socket pool + requests session
     pool = adafruit_connection_manager.get_radio_socketpool(esp)
     ssl_context = adafruit_connection_manager.get_radio_ssl_context(esp)
@@ -284,6 +284,16 @@ def fetch_predictions():
                 time.sleep(2)
                 continue
             raise
+
+def drop_network_objects():
+    global requests, pool, ssl_context
+    try:
+        requests = None
+        pool = None
+        ssl_context = None
+    except Exception:
+        pass
+    gc.collect()
 
 def direction_abbrev(preds):
     # Pull NB/SB from first prediction's rtdir if present
