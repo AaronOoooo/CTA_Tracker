@@ -24,9 +24,11 @@ STOP_ID = "1563"
 ROUTES = ["1", "4", "X4"]
 MAX_RESULTS = 5
 
-REFRESH_SECONDS = 30          # API refresh interval
+REFRESH_SECONDS = 30          # CTA API refresh interval
 UI_TICK_SECONDS = 1           # countdown/spinner tick
 HOST = "www.ctabustracker.com"
+
+WEATHER_REFRESH_SECONDS = 30 * 60  # OpenWeatherMap refresh interval
 
 DEST_WIDTH = 16             # width for destination column
 
@@ -68,6 +70,13 @@ for i in range(MAX_RESULTS):
     r = label.Label(terminalio.FONT, text="", x=8, y=y0 + (i * 18))
     rows.append(r)
     group.append(r)
+
+# Weather area below CTA arrivals
+line_weather_1 = label.Label(terminalio.FONT, text="Weather: --", x=8, y=158)
+group.append(line_weather_1)
+
+line_weather_2 = label.Label(terminalio.FONT, text="Loading weather...", x=8, y=176)
+group.append(line_weather_2)
 
 def set_rows(lines):
     for i in range(MAX_RESULTS):
@@ -242,6 +251,83 @@ def build_url():
         str(MAX_RESULTS),
     )
 
+def weather_city_for_url(city):
+    # Basic URL-safe city text for simple names like "Chicago" or "New York"
+    return str(city).replace(" ", "%20")
+
+def temp_to_int(value):
+    try:
+        return int(float(value) + 0.5)
+    except Exception:
+        return 0
+
+def set_weather_unavailable():
+    city = secrets.get("weather_city", "Chicago")
+    line_weather_1.text = "Weather: " + str(city)[:20]
+    line_weather_2.text = "Weather unavailable"
+
+def fetch_weather():
+    """
+    Fetches current weather from OpenWeatherMap.
+    Uses the city and API key stored in secrets.py.
+    Returns True if successful, False if not.
+    """
+    city = secrets.get("weather_city", "Chicago")
+    api_key = secrets.get("openweather_api_key", "")
+
+    if not api_key:
+        print("Weather: missing openweather_api_key in secrets.py")
+        set_weather_unavailable()
+        return False
+
+    url = (
+        "http://api.openweathermap.org/data/2.5/weather"
+        "?q={}&appid={}&units=imperial"
+    ).format(weather_city_for_url(city), api_key)
+
+    print("GET weather (url hidden)")
+
+    try:
+        with requests.get(url) as r:
+            data = r.json()
+
+        main = data.get("main", {})
+        weather_list = data.get("weather", [])
+
+        temp = temp_to_int(main.get("temp", 0))
+        hi = temp_to_int(main.get("temp_max", 0))
+        lo = temp_to_int(main.get("temp_min", 0))
+
+        desc = "Weather"
+        if weather_list and isinstance(weather_list, list):
+            desc = str(weather_list[0].get("description", "Weather"))
+            if desc:
+                desc = desc[0].upper() + desc[1:]
+
+        line_weather_1.text = "Weather: " + str(city)[:20]
+        line_weather_2.text = "{}F {} / Hi {} - Lo {}".format(temp, desc[:9], hi, lo)
+
+        try:
+            del data
+            del main
+            del weather_list
+        except Exception:
+            pass
+
+        gc_sweep("after weather")
+        return True
+
+    except MemoryError as e:
+        print("MemoryError during weather fetch:", repr(e))
+        print("Forcing device reset to recover memory.")
+        time.sleep(1)
+        microcontroller.reset()
+
+    except Exception as e:
+        print("Weather fetch error:", repr(e))
+        set_weather_unavailable()
+        return False
+
 def fetch_predictions():
     global rebuild_count
 
@@ -370,6 +456,7 @@ spinner_i = 0
 seconds_to_refresh = REFRESH_SECONDS
 last_updated_text = "--:--"
 time_ready = False
+last_weather_fetch = 0
 
 
 def update_header(stop_name, dir_abbrev, updated_text, seconds_left, spinner_char):
@@ -467,6 +554,10 @@ connect_wifi()
 time_ready = try_set_time_via_http()
 # time_ready = try_set_time_via_ntp()
 
+# Prime first weather fetch
+fetch_weather()
+last_weather_fetch = time.monotonic()
+
 
 # Prime first fetch so we can show stop name + direction immediately
 stop_name = "CTA Stop"
@@ -495,6 +586,12 @@ while True:
     try:
         # UI ticks every second; only fetch when countdown hits 0
         tick_ui(stop_name, dir_abbrev)
+
+        # Weather refreshes separately every 30 minutes.
+        # This keeps CTA predictions on their normal 30-second rhythm.
+        if (time.monotonic() - last_weather_fetch) >= WEATHER_REFRESH_SECONDS:
+            fetch_weather()
+            last_weather_fetch = time.monotonic()
 
         if seconds_to_refresh == 0:
             update_header(stop_name, dir_abbrev, last_updated_text, 0, "*")  # fetching indicator
