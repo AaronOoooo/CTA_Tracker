@@ -29,6 +29,9 @@ UI_TICK_SECONDS = 1           # countdown/spinner tick
 HOST = "www.ctabustracker.com"
 
 WEATHER_REFRESH_SECONDS = 30 * 60  # OpenWeatherMap refresh interval
+WEATHER_DETAIL_ROTATE_SECONDS = 30    # rotate extra weather details
+FORECAST_DAYS = 4                     # number of forecast days to show
+
 
 DEST_WIDTH = 16             # width for destination column
 
@@ -72,6 +75,8 @@ for i in range(MAX_RESULTS):
     group.append(r)
 
 # Weather area below CTA arrivals
+# Line 1 always shows current conditions.
+# Line 2 rotates extra weather details every 30 seconds.
 line_weather_1 = label.Label(terminalio.FONT, text="Weather: --", x=8, y=158)
 group.append(line_weather_1)
 
@@ -266,37 +271,129 @@ def set_weather_unavailable():
     line_weather_1.text = "Weather: " + str(city)[:20]
     line_weather_2.text = "Weather unavailable"
 
+def shorten_text(s, max_len):
+    s = str(s)
+    if len(s) <= max_len:
+        return s
+    if max_len <= 3:
+        return s[:max_len]
+    return s[:max_len - 3] + "..."
+
+
+def deg_to_compass(deg):
+    try:
+        deg = float(deg)
+    except Exception:
+        return ""
+    dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+    ix = int((deg + 22.5) / 45) % 8
+    return dirs[ix]
+
+
+def format_epoch_time_12h(epoch_value):
+    try:
+        t = time.localtime(int(epoch_value))
+        return format_clock_12h_lower(t.tm_hour, t.tm_min)
+    except Exception:
+        return "--:--"
+
+
+def day_name_from_epoch(epoch_value):
+    try:
+        t = time.localtime(int(epoch_value))
+        names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        return names[t.tm_wday]
+    except Exception:
+        return "Day"
+
+
+def make_forecast_panels(items):
+    """
+    Builds two compact 4-day forecast panels from OpenWeatherMap 3-hour forecast data.
+    Chooses one daytime-ish sample per date when possible.
+    """
+    daily = []
+    seen_dates = []
+    preferred_hours = [12, 15, 9, 18]
+
+    for target_hour in preferred_hours:
+        for item in items:
+            try:
+                dt_txt = str(item.get("dt_txt", ""))
+                date_part = dt_txt[:10]
+                hour_part = int(dt_txt[11:13]) if len(dt_txt) >= 13 else -1
+                if not date_part or date_part in seen_dates or hour_part != target_hour:
+                    continue
+
+                main = item.get("main", {})
+                temp_hi = temp_to_int(main.get("temp_max", main.get("temp", 0)))
+                temp_lo = temp_to_int(main.get("temp_min", main.get("temp", 0)))
+                name = day_name_from_epoch(item.get("dt", 0))
+                daily.append((date_part, name, temp_hi, temp_lo))
+                seen_dates.append(date_part)
+
+                if len(daily) >= FORECAST_DAYS:
+                    break
+            except Exception:
+                pass
+
+        if len(daily) >= FORECAST_DAYS:
+            break
+
+    panels = []
+    if len(daily) >= 2:
+        panels.append("{} {}/{} {} {}/{}".format(daily[0][1], daily[0][2], daily[0][3], daily[1][1], daily[1][2], daily[1][3]))
+    if len(daily) >= 4:
+        panels.append("{} {}/{} {} {}/{}".format(daily[2][1], daily[2][2], daily[2][3], daily[3][1], daily[3][2], daily[3][3]))
+    elif len(daily) >= 3:
+        panels.append("{} {}/{}".format(daily[2][1], daily[2][2], daily[2][3]))
+
+    return panels
+
+
 def fetch_weather():
     """
-    Fetches current weather from OpenWeatherMap.
-    Uses the city and API key stored in secrets.py.
-    Returns True if successful, False if not.
+    Fetches current weather and 4-day forecast from OpenWeatherMap.
+    Keeps current conditions always visible and rebuilds the rotating detail panels.
+    Returns True if current weather succeeds, False if not.
     """
+    global weather_detail_panels, weather_detail_index, last_weather_detail_rotate
+
     city = secrets.get("weather_city", "Chicago")
     api_key = secrets.get("openweather_api_key", "")
 
     if not api_key:
         print("Weather: missing openweather_api_key in secrets.py")
         set_weather_unavailable()
+        weather_detail_panels = ["Weather unavailable"]
         return False
 
-    url = (
+    current_url = (
         "http://api.openweathermap.org/data/2.5/weather"
         "?q={}&appid={}&units=imperial"
     ).format(weather_city_for_url(city), api_key)
 
-    print("GET weather (url hidden)")
+    forecast_url = (
+        "http://api.openweathermap.org/data/2.5/forecast"
+        "?q={}&appid={}&units=imperial"
+    ).format(weather_city_for_url(city), api_key)
+
+    print("GET weather current (url hidden)")
 
     try:
-        with requests.get(url) as r:
+        with requests.get(current_url) as r:
             data = r.json()
 
         main = data.get("main", {})
         weather_list = data.get("weather", [])
+        wind = data.get("wind", {})
+        sys_data = data.get("sys", {})
 
         temp = temp_to_int(main.get("temp", 0))
         hi = temp_to_int(main.get("temp_max", 0))
         lo = temp_to_int(main.get("temp_min", 0))
+        feels = temp_to_int(main.get("feels_like", temp))
+        humidity = int(main.get("humidity", 0))
 
         desc = "Weather"
         if weather_list and isinstance(weather_list, list):
@@ -304,15 +401,69 @@ def fetch_weather():
             if desc:
                 desc = desc[0].upper() + desc[1:]
 
-        line_weather_1.text = "Weather: " + str(city)[:20]
-        line_weather_2.text = "{}F {} / Hi {} - Lo {}".format(temp, desc[:9], hi, lo)
+        wind_speed = temp_to_int(wind.get("speed", 0))
+        wind_dir = deg_to_compass(wind.get("deg", ""))
+
+        sunrise = format_epoch_time_12h(sys_data.get("sunrise", 0))
+        sunset = format_epoch_time_12h(sys_data.get("sunset", 0))
+
+        # Always-visible weather line.
+        line_weather_1.text = "{}F {} / Hi {} - Lo {}".format(temp, desc[:9], hi, lo)
+
+        new_panels = []
+        new_panels.append("Rain --% / Wind {}mph {}".format(wind_speed, wind_dir))
+        new_panels.append("Feels {}F / Hum {}%".format(feels, humidity))
+        new_panels.append("Rise {} Set {}".format(sunrise, sunset))
 
         try:
             del data
             del main
             del weather_list
+            del wind
+            del sys_data
         except Exception:
             pass
+
+        print("GET weather forecast (url hidden)")
+
+        try:
+            with requests.get(forecast_url) as r:
+                fdata = r.json()
+
+            items = fdata.get("list", [])
+
+            if isinstance(items, list) and items:
+                # OpenWeatherMap forecast POP is 0.0 to 1.0.
+                # Use the highest chance in the next 24 hours.
+                max_pop = 0
+                for item in items[:8]:
+                    try:
+                        pop = int(float(item.get("pop", 0)) * 100)
+                        if pop > max_pop:
+                            max_pop = pop
+                    except Exception:
+                        pass
+
+                new_panels[0] = "Rain {}% / Wind {}mph {}".format(max_pop, wind_speed, wind_dir)
+
+                forecast_panels = make_forecast_panels(items)
+                if forecast_panels:
+                    new_panels = [new_panels[0], new_panels[1]] + forecast_panels + [new_panels[2]]
+
+            try:
+                del fdata
+                del items
+            except Exception:
+                pass
+
+        except Exception as e:
+            print("Weather forecast fetch error:", repr(e))
+            # Current weather still displays even if the forecast request fails.
+
+        weather_detail_panels = new_panels
+        weather_detail_index = 0
+        last_weather_detail_rotate = time.monotonic()
+        line_weather_2.text = shorten_text(weather_detail_panels[0], 30)
 
         gc_sweep("after weather")
         return True
@@ -326,7 +477,25 @@ def fetch_weather():
     except Exception as e:
         print("Weather fetch error:", repr(e))
         set_weather_unavailable()
+        weather_detail_panels = ["Weather unavailable"]
+        weather_detail_index = 0
         return False
+
+
+def rotate_weather_detail_if_needed():
+    global weather_detail_index, last_weather_detail_rotate
+
+    if not weather_detail_panels:
+        return
+
+    if (time.monotonic() - last_weather_detail_rotate) >= WEATHER_DETAIL_ROTATE_SECONDS:
+        weather_detail_index += 1
+        if weather_detail_index >= len(weather_detail_panels):
+            weather_detail_index = 0
+
+        line_weather_2.text = shorten_text(weather_detail_panels[weather_detail_index], 30)
+        last_weather_detail_rotate = time.monotonic()
+
 
 def fetch_predictions():
     global rebuild_count
@@ -457,6 +626,9 @@ seconds_to_refresh = REFRESH_SECONDS
 last_updated_text = "--:--"
 time_ready = False
 last_weather_fetch = 0
+last_weather_detail_rotate = 0
+weather_detail_index = 0
+weather_detail_panels = ["Loading weather..."]
 
 
 def update_header(stop_name, dir_abbrev, updated_text, seconds_left, spinner_char):
@@ -586,6 +758,8 @@ while True:
     try:
         # UI ticks every second; only fetch when countdown hits 0
         tick_ui(stop_name, dir_abbrev)
+
+        rotate_weather_detail_if_needed()
 
         # Weather refreshes separately every 30 minutes.
         # This keeps CTA predictions on their normal 30-second rhythm.
