@@ -65,6 +65,26 @@ MAX_REBUILDS_BEFORE_RESET = 3
 rebuild_count = 0
 
 # =========================
+# DISPLAY COLORS (v0.4.0)
+# =========================
+# PyPortal labels can use 24-bit RGB color values.
+# These colors keep the black background but make each section easier to read.
+COLOR_WHITE = 0xFFFFFF
+COLOR_GRAY = 0x888888
+COLOR_CYAN = 0x00FFFF
+COLOR_YELLOW = 0xFFFF00
+COLOR_GREEN = 0x00FF00
+COLOR_ORANGE = 0xFF9900
+COLOR_RED = 0xFF0000
+COLOR_PURPLE = 0xCC66FF
+
+# CTA arrival urgency colors
+COLOR_DUE = COLOR_RED       # Bus is here / almost here
+COLOR_SOON = COLOR_YELLOW   # Bus is close
+COLOR_LATER = COLOR_GREEN   # You have some time
+COLOR_NORMAL = COLOR_WHITE
+
+# =========================
 # DISPLAY SETUP (Option A)
 # =========================
 display = board.DISPLAY
@@ -72,37 +92,48 @@ group = displayio.Group()
 display.root_group = group
 
 # Line 1: Stop name + (NB/SB)
-line_stop = label.Label(terminalio.FONT, text="(starting...)", x=8, y=14)
+line_stop = label.Label(terminalio.FONT, text="(starting...)", x=8, y=14, color=COLOR_CYAN)
 group.append(line_stop)
 
 # Line 2: Updated time + Next in + spinner
-line_status = label.Label(terminalio.FONT, text="Updated --:--  Next in --s  |", x=8, y=32)
+line_status = label.Label(terminalio.FONT, text="Updated --:--  Next in --s  |", x=8, y=32, color=COLOR_YELLOW)
 group.append(line_status)
 
 # Divider
-divider = label.Label(terminalio.FONT, text="-" * 30, x=8, y=44)
+divider = label.Label(terminalio.FONT, text="-" * 30, x=8, y=44, color=COLOR_GRAY)
 group.append(divider)
 
 # Arrivals
 rows = []
 y0 = 60
 for i in range(MAX_RESULTS):
-    r = label.Label(terminalio.FONT, text="", x=8, y=y0 + (i * 18))
+    r = label.Label(terminalio.FONT, text="", x=8, y=y0 + (i * 18), color=COLOR_NORMAL)
     rows.append(r)
     group.append(r)
 
 # Weather area below CTA arrivals
-# Line 1 always shows home/current conditions.
-# Line 2 rotates home weather details plus one world city panel.
-line_weather_1 = label.Label(terminalio.FONT, text="Weather: --", x=8, y=158)
+# Header + current Chicago weather stay visible.
+# A divider separates the current weather from the rotating detail/world panel.
+line_weather_header = label.Label(terminalio.FONT, text="Chicago Weather", x=8, y=154, color=COLOR_PURPLE)
+group.append(line_weather_header)
+
+line_weather_1 = label.Label(terminalio.FONT, text="Chicago: --", x=8, y=172, color=COLOR_ORANGE)
 group.append(line_weather_1)
 
-line_weather_2 = label.Label(terminalio.FONT, text="Loading weather...", x=8, y=176)
+weather_divider = label.Label(terminalio.FONT, text="-" * 30, x=8, y=190, color=COLOR_GRAY)
+group.append(weather_divider)
+
+line_weather_2 = label.Label(terminalio.FONT, text="Loading weather...", x=8, y=210, color=COLOR_PURPLE)
 group.append(line_weather_2)
 
-def set_rows(lines):
+def set_rows(lines, colors=None):
     for i in range(MAX_RESULTS):
         rows[i].text = lines[i] if i < len(lines) else ""
+
+        if colors and i < len(colors):
+            rows[i].color = colors[i]
+        else:
+            rows[i].color = COLOR_NORMAL
 
     # SERIAL MIRROR
     if DEBUG_ROWS:
@@ -336,8 +367,25 @@ def temp_to_int(value):
 
 def set_weather_unavailable():
     city = secrets.get("weather_city", "Chicago")
-    line_weather_1.text = "Weather: " + str(city)[:20]
+    city_name = weather_city_display_name(city)
+    line_weather_header.color = COLOR_PURPLE
+    line_weather_header.text = shorten_text(city_name + " Weather", 30)
+    line_weather_1.color = COLOR_ORANGE
+    line_weather_2.color = COLOR_RED
+    line_weather_1.text = shorten_text(city_name + ": weather unavailable", 30)
     line_weather_2.text = "Weather unavailable"
+
+def weather_panel_color(panel):
+    # World city panels contain a colon, for example "Tokyo: 74F Clear".
+    # Keep home weather details purple and world weather cyan.
+    try:
+        text = str(panel)
+        if ":" in text and not text.startswith("Rise"):
+            return COLOR_CYAN
+    except Exception:
+        pass
+    return COLOR_PURPLE
+
 
 def shorten_text(s, max_len):
     s = str(s)
@@ -475,8 +523,16 @@ def fetch_weather():
         sunrise = format_epoch_time_12h(sys_data.get("sunrise", 0))
         sunset = format_epoch_time_12h(sys_data.get("sunset", 0))
 
-        # Always-visible weather line.
-        line_weather_1.text = "{}F {} / Hi {} - Lo {}".format(temp, desc[:9], hi, lo)
+        # Always-visible home weather section.
+        city_name = weather_city_display_name(city)
+        line_weather_header.color = COLOR_PURPLE
+        line_weather_header.text = shorten_text(city_name + " Weather", 30)
+        line_weather_1.color = COLOR_ORANGE
+        line_weather_2.color = COLOR_PURPLE
+        line_weather_1.text = shorten_text(
+            "{}: {}F {} Hi{} Lo{}".format(city_name, temp, desc[:8], hi, lo),
+            30
+        )
 
         new_panels = []
         new_panels.append("Rain --% / Wind {}mph {}".format(wind_speed, wind_dir))
@@ -538,6 +594,7 @@ def fetch_weather():
         weather_detail_panels = new_panels
         weather_detail_index = 0
         last_weather_detail_rotate = time.monotonic()
+        line_weather_2.color = weather_panel_color(weather_detail_panels[0])
         line_weather_2.text = shorten_text(weather_detail_panels[0], 30)
 
         gc_sweep("after weather")
@@ -568,7 +625,9 @@ def rotate_weather_detail_if_needed():
         if weather_detail_index >= len(weather_detail_panels):
             weather_detail_index = 0
 
-        line_weather_2.text = shorten_text(weather_detail_panels[weather_detail_index], 30)
+        panel = weather_detail_panels[weather_detail_index]
+        line_weather_2.color = weather_panel_color(panel)
+        line_weather_2.text = shorten_text(panel, 30)
         last_weather_detail_rotate = time.monotonic()
 
 
@@ -609,7 +668,7 @@ def fetch_predictions():
         except (OutOfRetries, OSError, TimeoutError, RuntimeError, ValueError) as e:
             print("Fetch error:", repr(e))
             if attempt == 0:
-                set_rows(["Network hiccup...", "Rebuilding..."])
+                set_rows(["Network hiccup...", "Rebuilding..."], [COLOR_YELLOW, COLOR_YELLOW])
                 rebuild_network()
                 time.sleep(2)
                 continue
@@ -666,6 +725,30 @@ def pad_right(s, width):
     if len(s) >= width:
         return s[:width]
     return s + (" " * (width - len(s)))
+
+
+def arrival_row_color(p):
+    """
+    Color-code the whole arrival row by urgency.
+    DUE / 0-2 minutes = red, 3-5 minutes = yellow, 6+ minutes = green.
+    """
+    if not isinstance(p, dict):
+        return COLOR_NORMAL
+
+    cdn = str(p.get("prdctdn", "")).strip().upper()
+
+    if cdn == "DUE":
+        return COLOR_DUE
+
+    try:
+        mins = int(cdn)
+        if mins <= 2:
+            return COLOR_DUE
+        if mins <= 5:
+            return COLOR_SOON
+        return COLOR_LATER
+    except Exception:
+        return COLOR_NORMAL
 
 
 def format_arrival_line(p):
@@ -818,15 +901,17 @@ try:
     stop_name = stop_name_from_preds(preds)
     dir_abbrev = direction_abbrev(preds)
 
-    lines = [format_arrival_line(p) for p in preds[:MAX_RESULTS]]
-    set_rows(lines)
+    display_preds = preds[:MAX_RESULTS]
+    lines = [format_arrival_line(p) for p in display_preds]
+    colors = [arrival_row_color(p) for p in display_preds]
+    set_rows(lines, colors)
 
     mark_updated_now()
     seconds_to_refresh = REFRESH_SECONDS
 
 except Exception as e:
     print("Startup fetch error:", repr(e))
-    set_rows(["Error: " + str(e)[:20]])
+    set_rows(["Error: " + str(e)[:20]], [COLOR_RED])
     # keep stop_name/dir as defaults
 
 while True:
@@ -850,8 +935,10 @@ while True:
             stop_name = stop_name_from_preds(preds)
             dir_abbrev = direction_abbrev(preds)
 
-            lines = [format_arrival_line(p) for p in preds[:MAX_RESULTS]]
-            set_rows(lines)
+            display_preds = preds[:MAX_RESULTS]
+            lines = [format_arrival_line(p) for p in display_preds]
+            colors = [arrival_row_color(p) for p in display_preds]
+            set_rows(lines, colors)
 
             mark_updated_now()
             seconds_to_refresh = REFRESH_SECONDS
@@ -860,7 +947,7 @@ while True:
 
     except (TimeoutError, RuntimeError, OSError, OutOfRetries, ValueError) as e:
         print("Network error:", repr(e))
-        set_rows(["Network issue...", "Reconnecting..."])
+        set_rows(["Network issue...", "Reconnecting..."], [COLOR_YELLOW, COLOR_YELLOW])
         rebuild_network()
         # Optionally force immediate refresh after recovery:
         seconds_to_refresh = 1
