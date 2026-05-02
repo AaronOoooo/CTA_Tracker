@@ -1,4 +1,5 @@
 import time
+import random
 import board
 import busio
 import digitalio
@@ -31,6 +32,22 @@ HOST = "www.ctabustracker.com"
 WEATHER_REFRESH_SECONDS = 30 * 60  # OpenWeatherMap refresh interval
 WEATHER_DETAIL_ROTATE_SECONDS = 30    # rotate extra weather details
 FORECAST_DAYS = 4                     # number of forecast days to show
+
+# Home weather always stays visible on line 1.
+# The cities below are used as occasional "world weather" panels on line 2.
+WORLD_WEATHER_CITIES = [
+    "Lexington,KY,US",
+    "New York,US",
+    "Los Angeles,US",
+    "Miami,US",
+    "Rio de Janeiro,BR",
+    "London,GB",
+    "Tokyo,JP",
+    "Toronto,CA",
+    "Atlanta,US",
+    "Juneau,AK,US",
+    "Paris,FR",
+]
 
 
 DEST_WIDTH = 16             # width for destination column
@@ -75,8 +92,8 @@ for i in range(MAX_RESULTS):
     group.append(r)
 
 # Weather area below CTA arrivals
-# Line 1 always shows current conditions.
-# Line 2 rotates extra weather details every 30 seconds.
+# Line 1 always shows home/current conditions.
+# Line 2 rotates home weather details plus one world city panel.
 line_weather_1 = label.Label(terminalio.FONT, text="Weather: --", x=8, y=158)
 group.append(line_weather_1)
 
@@ -260,6 +277,57 @@ def weather_city_for_url(city):
     # Basic URL-safe city text for simple names like "Chicago" or "New York"
     return str(city).replace(" ", "%20")
 
+def weather_city_display_name(city):
+    # Turn "Lexington,KY,US" into "Lexington" for the small screen.
+    return str(city).split(",")[0]
+
+def fetch_world_weather_panel(api_key):
+    """
+    Fetches current weather for one random world city.
+    Returns a compact panel string like 'Tokyo: 74F Clear'.
+    If anything fails, returns None so home weather is not affected.
+    """
+    if not WORLD_WEATHER_CITIES:
+        return None
+
+    city = random.choice(WORLD_WEATHER_CITIES)
+    url = (
+        "http://api.openweathermap.org/data/2.5/weather"
+        "?q={}&appid={}&units=imperial"
+    ).format(weather_city_for_url(city), api_key)
+
+    try:
+        print("GET world weather current (url hidden)")
+        with requests.get(url) as r:
+            data = r.json()
+
+        main = data.get("main", {})
+        weather_list = data.get("weather", [])
+
+        temp = temp_to_int(main.get("temp", 0))
+
+        desc = "Weather"
+        if weather_list and isinstance(weather_list, list):
+            desc = str(weather_list[0].get("description", "Weather"))
+            if desc:
+                desc = desc[0].upper() + desc[1:]
+
+        panel = "{}: {}F {}".format(weather_city_display_name(city), temp, desc[:12])
+
+        try:
+            del data
+            del main
+            del weather_list
+        except Exception:
+            pass
+
+        return panel
+
+    except Exception as e:
+        print("World weather fetch error:", repr(e))
+        return None
+
+
 def temp_to_int(value):
     try:
         return int(float(value) + 0.5)
@@ -413,6 +481,11 @@ def fetch_weather():
         new_panels = []
         new_panels.append("Rain --% / Wind {}mph {}".format(wind_speed, wind_dir))
         new_panels.append("Feels {}F / Hum {}%".format(feels, humidity))
+
+        world_panel = fetch_world_weather_panel(api_key)
+        if world_panel:
+            new_panels.append(world_panel)
+
         new_panels.append("Rise {} Set {}".format(sunrise, sunset))
 
         try:
@@ -448,7 +521,9 @@ def fetch_weather():
 
                 forecast_panels = make_forecast_panels(items)
                 if forecast_panels:
-                    new_panels = [new_panels[0], new_panels[1]] + forecast_panels + [new_panels[2]]
+                    # Keep rain + feels first, then forecast panels, then any remaining panels
+                    # such as world weather and sunrise/sunset.
+                    new_panels = [new_panels[0], new_panels[1]] + forecast_panels + new_panels[2:]
 
             try:
                 del fdata
